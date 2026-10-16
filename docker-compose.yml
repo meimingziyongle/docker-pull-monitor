@@ -1,0 +1,14 @@
+services:
+  docker-pull-monitor:
+    image: chajian/docker-pull-monitor:latest
+    container_name: docker-pull-monitor
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - DB_FILE=/app/data/monitor.db

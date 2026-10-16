@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>DOCKER PULL TELEMETRY & NETWORK INSPECTOR</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['"JetBrains Mono"', 'Consolas', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+            sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif']
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-feature-settings: "tnum"; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 2px; }
+    .dark ::-webkit-scrollbar-thumb { background: #334155; }
+  </style>
+</head>
+<body class="bg-[#f4f6f8] dark:bg-slate-950 text-slate-800 dark:text-slate-100 min-h-screen transition-colors duration-150">
+  <div id="app" class="max-w-[1600px] mx-auto p-3.5 space-y-3.5">
+
+    <!-- ==================== 顶部工业遥测导航栏 ==================== -->
+    <header class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 px-4 py-3 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-3 shadow-sm">
+      <div class="flex items-center gap-3.5">
+        <!-- ONLINE 状态徽章 -->
+        <div class="flex items-center gap-1.5 px-2.5 py-1 border text-xs font-mono font-bold tracking-wider"
+          :class="wsConnected ? 'border-emerald-500/50 bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400' : 'border-rose-500/50 bg-rose-50 text-rose-600'">
+          <span class="w-2 h-2 rounded-full" :class="wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'"></span>
+          <span>{{ wsConnected ? 'ONLINE' : 'OFFLINE' }}</span>
+        </div>
+
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-base font-extrabold tracking-tight text-slate-900 dark:text-white uppercase">
+              DOCKER PULL TELEMETRY & NETWORK INSPECTOR
+            </h1>
+            <span class="text-[11px] font-mono bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 px-1.5 py-0.5">
+              ENGINE v{{ hostInfo.host?.docker_ver || '...' }}
+            </span>
+          </div>
+          <p class="text-[11px] font-mono text-slate-500 dark:text-slate-400 mt-0.5">
+            HOST: {{ hostInfo.host?.name || '...' }} ({{ hostInfo.host?.arch || 'x86_64' }}) //
+            DRIVER: {{ hostInfo.host?.driver || 'overlay2' }} //
+            KERNEL: {{ hostInfo.host?.kernel || '...' }}
+          </p>
+        </div>
+      </div>
+
+      <!-- 右侧拉取控制组 + 停止拉取 (ABORT) + 亮暗主题切换 -->
+      <div class="flex items-center gap-2 w-full lg:w-auto">
+        <div class="flex items-center flex-1 lg:flex-initial border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950">
+          <span class="px-2.5 py-1.5 text-xs font-mono text-slate-400 border-r border-slate-300 dark:border-slate-800 select-none">
+            docker pull
+          </span>
+          <input v-model="pullInput" @keyup.enter="!isPulling && triggerPull()"
+            placeholder="jgraph/export-server:latest"
+            class="bg-transparent px-3 py-1.5 text-xs font-mono text-slate-800 dark:text-slate-100 w-full lg:w-64 focus:outline-none" />
+        </div>
+
+        <!-- 动态切换：执行拉取 vs 停止拉取 (ABORT) -->
+        <button v-if="!isPulling" @click="triggerPull"
+          class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 text-xs font-mono font-bold tracking-wide transition whitespace-nowrap shadow-sm">
+          ▶ 立即拉取 (PULL)
+        </button>
+        <button v-else @click="abortPull"
+          class="bg-red-600 hover:bg-red-700 text-white px-4 py-1.5 text-xs font-mono font-bold tracking-wide transition whitespace-nowrap shadow-sm animate-pulse">
+          ■ 停止拉取 (ABORT)
+        </button>
+
+        <!-- 亮/暗工业风切换按钮 -->
+        <button @click="toggleTheme"
+          class="border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 px-3 py-1.5 text-xs font-mono font-semibold transition whitespace-nowrap">
+          {{ isDark ? '☀️ LIGHT' : '🌙 DARK' }}
+        </button>
+      </div>
+    </header>
+
+    <!-- ==================== 第一行：6 项工业遥测指标卡 ==================== -->
+    <section class="grid grid-cols-2 md:grid-cols-6 gap-3">
+      <div class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 px-4 py-3">
+        <div class="text-[11px] text-slate-500 dark:text-slate-400 font-medium">累计拉取任务</div>
+        <div class="mt-1 font-mono flex items-baseline gap-1.5">
+          <span class="text-2xl font-extrabold text-slate-900 dark:text-white">{{ stats.total_pulls }}</span>
+          <span class="text-[11px] text-slate-400">TASKS</span>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 px-4 py-3">
+        <div class="text-[11px] text-slate-500 dark:text-slate-400 font-medium">累计分片流量</div>
+        <div class="mt-1 font-mono flex items-baseline gap-1.5">
+          <span class="text-2xl font-extrabold text-blue-600 dark:text-sky-400">{{ stats.total_mb }}</span>
+          <span class="text-[11px] text-slate-400">MB</span>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 px-4 py-3">
+        <div class="text-[11px] text-slate-500 dark:text-slate-400 font-medium">当前聚合下载速率</div>
+        <div class="mt-1 font-mono flex items-baseline gap-1.5">
+          <span class="text-2xl font-extrabold text-emerald-600 dark:text-emerald-400">{{ formatSpeed(totalSpeedBps) }}</span>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 px-4 py-3">
+        <div class="text-[11px] text-slate-500 dark:text-slate-400 font-medium">捕获 REGISTRY 报文</div>
+        <div class="mt-1 font-mono flex items-baseline gap-1.5">
+          <span class="text-2xl font-extrabold text-slate-900 dark:text-white">{{ stats.total_packets }}</span>
+          <span class="text-[11px] text-slate-400">PKTS</span>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 px-4 py-3">
+        <div class="text-[11px] text-slate-500 dark:text-slate-400 font-medium">REGISTRY 平均 RTT</div>
+        <div class="mt-1 font-mono flex items-baseline gap-1.5">
+          <span class="text-2xl font-extrabold text-emerald-600 dark:text-emerald-400">{{ stats.avg_latency_ms }}</span>
+          <span class="text-[11px] text-slate-400">ms</span>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 px-4 py-3">
+        <div class="text-[11px] text-slate-500 dark:text-slate-400 font-medium">DOCKER HUB 剩余配额</div>
+        <div class="mt-1 font-mono flex items-baseline gap-1.5">
+          <span class="text-2xl font-extrabold text-slate-900 dark:text-white">{{ rateLimitRemaining }}</span>
+          <span class="text-[11px] text-slate-400">/ 6h</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 第二行：主监控双联屏（左：分片拉取甘特图 | 右：OCI 五阶段卡点诊断与瀑布流） ==================== -->
+    <section class="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
+
+      <!-- 左侧 (6列)：LAYER GANTT TIMELINE // 分片拉取甘特图 -->
+      <div class="lg:col-span-6 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 p-4 flex flex-col min-h-[470px]">
+        <div class="flex justify-between items-center pb-3 border-b border-slate-200 dark:border-slate-800">
+          <div class="flex items-center gap-2">
+            <h2 class="text-xs font-extrabold tracking-wider uppercase text-slate-900 dark:text-white">
+              LAYER GANTT TIMELINE // 分片拉取甘特图
+            </h2>
+            <span class="text-[11px] font-mono bg-blue-50 dark:bg-sky-950 text-blue-600 dark:text-sky-400 border border-blue-200 dark:border-sky-800 px-2 py-0.5">
+              来源: {{ pullSource }}
+            </span>
+          </div>
+        </div>
+
+        <!-- 4 色状态图例 -->
+        <div class="flex items-center gap-4 text-[11px] font-mono text-slate-600 dark:text-slate-400 my-2.5">
+          <span class="flex items-center gap-1.5"><i class="w-2.5 h-2.5 inline-block bg-slate-300 dark:bg-slate-700"></i>排队</span>
+          <span class="flex items-center gap-1.5"><i class="w-2.5 h-2.5 inline-block bg-blue-600"></i>下载(DL)</span>
+          <span class="flex items-center gap-1.5"><i class="w-2.5 h-2.5 inline-block bg-emerald-500"></i>解压(EXT)</span>
+          <span class="flex items-center gap-1.5"><i class="w-2.5 h-2.5 inline-block bg-slate-500"></i>缓存(CACHED)</span>
+        </div>
+
+        <!-- 全局汇总进度框 -->
+        <div class="border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950 p-3 mb-3">
+          <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-1 text-xs font-mono">
+            <div>
+              <span class="text-blue-600 dark:text-sky-400 font-bold">{{ activeImage || pullInput || '等待拉取任务' }}</span>
+              <span class="ml-1.5 font-semibold" :class="{
+                'text-amber-600 dark:text-amber-400': pullStateTag === 'STARTING' || pullStateTag === 'DOWNLOADING',
+                'text-emerald-600 dark:text-emerald-400': pullStateTag === 'COMPLETED',
+                'text-rose-600 dark:text-rose-400': pullStateTag === 'ABORTED'
+              }">[{{ pullStateTag }}]</span>
+            </div>
+            <div class="text-slate-600 dark:text-slate-400">
+              总进度: <strong class="text-slate-900 dark:text-white">{{ overallPercent }}%</strong>
+              ({{ completedLayers }}/{{ layers.length }} 层 | {{ formatBytes(downloadedBytes) }} / {{ formatBytes(totalPullBytes) }} | {{ elapsedSec }}s<span v-if="etaSec > 0"> | ETA {{ etaSec }}s</span>)
+            </div>
+          </div>
+          <div class="w-full bg-slate-200 dark:bg-slate-800 h-1.5 mt-2 overflow-hidden">
+            <div class="h-full transition-all duration-150"
+              :class="pullStateTag === 'ABORTED' ? 'bg-rose-500' : (pullStateTag === 'COMPLETED' ? 'bg-emerald-500' : 'bg-blue-600')"
+              :style="{ width: overallPercent + '%' }"></div>
+          </div>
+        </div>
+
+        <!-- 空闲态提示语（保留原截图说明） -->
+        <div v-if="layers.length === 0" class="flex-1 flex flex-col items-center justify-center text-center px-6 py-10 text-xs text-slate-400 dark:text-slate-500 space-y-2">
+          <p>当前无活跃拉取流。可在顶部输入镜像拉取，或直接在宿主机 SSH / Portainer 部署堆栈触发自动捕获。</p>
+          <p>
+            提示：将 Portainer 环境指向
+            <code class="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-amber-300 px-1.5 py-0.5 border border-slate-300 dark:border-slate-700 font-mono">
+              http://{{ currentHost }}/docker-api
+            </code>
+            可 100% 捕获堆栈部署原生甘特图。
+          </p>
+        </div>
+
+        <!-- 活跃分片多段甘特图列表 -->
+        <div v-else class="space-y-2 overflow-y-auto max-h-[310px] pr-1 font-mono">
+          <div v-for="l in layers" :key="l.id" class="border border-slate-200 dark:border-slate-800 p-2.5 text-xs bg-white dark:bg-slate-950/60">
+            <div class="flex justify-between items-center mb-1.5">
+              <div class="flex items-center gap-2">
+                <span class="font-bold text-slate-800 dark:text-slate-200">{{ l.id }}</span>
+                <span class="text-[10px] px-1.5 py-0.5 font-semibold" :class="{
+                  'bg-slate-100 dark:bg-slate-800 text-slate-500': l.phase === 'QUEUE',
+                  'bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400': l.phase === 'DL',
+                  'bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400': l.phase === 'EXT' || l.phase === 'DONE',
+                  'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400': l.phase === 'CACHED'
+                }">{{ l.status }} ({{ l.percent }}%)</span>
+              </div>
+              <div class="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-3">
+                <span v-if="l.speed_bps > 0" class="text-blue-600 dark:text-sky-400 font-bold">{{ formatSpeed(l.speed_bps) }}</span>
+                <span>{{ formatBytes(l.current) }} / {{ formatBytes(l.total) }}</span>
+                <span class="text-slate-400">DL:{{ l.dl_sec }}s | EXT:{{ l.ext_sec }}s</span>
+              </div>
+            </div>
+
+            <!-- 分片级四色甘特图横条 -->
+            <div class="w-full bg-slate-100 dark:bg-slate-900 h-2.5 flex overflow-hidden border border-slate-200 dark:border-slate-800">
+              <template v-if="l.phase === 'CACHED'">
+                <div class="h-full bg-slate-400 dark:bg-slate-600 w-full"></div>
+              </template>
+              <template v-else>
+                <div class="h-full bg-slate-300 dark:bg-slate-700 transition-all" :style="{ width: layerSegmentWidths(l).q }"></div>
+                <div class="h-full bg-blue-600 transition-all" :style="{ width: layerSegmentWidths(l).dl }"></div>
+                <div class="h-full bg-emerald-500 transition-all" :style="{ width: layerSegmentWidths(l).ext }"></div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右侧 (6列)：OCI REGISTRY PIPELINE & PACKET WATERFALL // 网络卡点诊断 -->
+      <div class="lg:col-span-6 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 p-4 flex flex-col min-h-[470px]">
+        <div class="flex justify-between items-center pb-3 border-b border-slate-200 dark:border-slate-800">
+          <h2 class="text-xs font-extrabold tracking-wider uppercase text-slate-900 dark:text-white">
+            OCI REGISTRY PIPELINE & PACKET WATERFALL // 网络卡点诊断
+          </h2>
+          <span class="text-[11px] text-slate-400">点击任意抓包行可展开完整 CDN 节点详情</span>
+        </div>
+
+        <!-- 5 阶段流水线卡片 (STAGE 01 - STAGE 05) -->
+        <div class="grid grid-cols-5 gap-2 my-3">
+          <div v-for="st in pipelineStages" :key="st.idx"
+            class="border p-2.5 transition-all"
+            :class="{
+              'border-blue-500 bg-blue-50/40 dark:bg-sky-950/30': st.status === 'RUNNING',
+              'border-emerald-500/60 bg-emerald-50/20 dark:bg-emerald-950/20': st.status === 'OK',
+              'border-rose-500 bg-rose-50/40 dark:bg-rose-950/30': st.status === 'ERROR',
+              'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950': st.status === 'IDLE'
+            }">
+            <div class="flex items-center justify-between text-[10px] font-mono">
+              <span class="font-bold" :class="st.status === 'RUNNING' ? 'text-blue-600 dark:text-sky-400' : 'text-slate-400'">STAGE 0{{ st.idx }}</span>
+              <span v-if="st.status === 'RUNNING'" class="text-blue-600 dark:text-sky-400 font-bold animate-pulse">● RUNNING</span>
+              <span v-else-if="st.status === 'OK'" class="text-emerald-600 dark:text-emerald-400 font-bold">✓ OK</span>
+              <span v-else-if="st.status === 'ERROR'" class="text-rose-600 font-bold">✕ ERR</span>
+            </div>
+            <div class="text-xs font-bold text-slate-800 dark:text-slate-100 mt-1 truncate">{{ st.title }}</div>
+            <div class="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 truncate font-mono">{{ st.subtitle }}</div>
+          </div>
+        </div>
+
+        <!-- [卡点诊断] 实时横幅 -->
+        <div class="border-l-4 px-3 py-2 text-xs font-mono mb-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800"
+          :class="diagnosticError ? 'border-l-rose-500 text-rose-600 dark:text-rose-400' : 'border-l-blue-600 text-slate-700 dark:text-slate-300'">
+          <strong class="font-bold">[卡点诊断]</strong> {{ diagnosticText }}
+        </div>
+
+        <!-- 耗时瀑布流 (Waterfall) 表格 -->
+        <div class="overflow-x-auto flex-1 max-h-[260px]">
+          <table class="w-full text-left border-collapse text-xs font-mono">
+            <thead>
+              <tr class="border-b border-slate-200 dark:border-slate-800 text-[11px] text-slate-400 font-sans">
+                <th class="py-1.5 px-2">时间</th>
+                <th class="py-1.5 px-2">阶段</th>
+                <th class="py-1.5 px-2">状态</th>
+                <th class="py-1.5 px-2">目标主机 / CDN 节点</th>
+                <th class="py-1.5 px-2">耗时瀑布 (Waterfall)</th>
+                <th class="py-1.5 px-2">报文诊断摘要</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-200/70 dark:divide-slate-800/70">
+              <template v-for="(pkt, idx) in packets" :key="idx">
+                <tr @click="selectedPacketIdx = (selectedPacketIdx === idx ? null : idx)"
+                  class="hover:bg-slate-100/80 dark:hover:bg-slate-800/50 cursor-pointer transition">
+                  <td class="py-2 px-2 text-slate-500 whitespace-nowrap">{{ pkt.created_at }}</td>
+                  <td class="py-2 px-2 font-sans font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">{{ pkt.stage }}</td>
+                  <td class="py-2 px-2 whitespace-nowrap">
+                    <span class="px-1.5 py-0.5 border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-600 dark:text-slate-300 text-[10px] mr-1">{{ pkt.method }}</span>
+                    <span class="px-1.5 py-0.5 text-[10px] font-bold" :class="{
+                      'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400': pkt.status_code >= 200 && pkt.status_code < 300,
+                      'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-400': pkt.status_code >= 300 && pkt.status_code < 500,
+                      'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-400': pkt.status_code >= 500 || pkt.status_code === 0
+                    }">{{ pkt.status_code }}</span>
+                  </td>
+                  <td class="py-2 px-2 text-blue-600 dark:text-sky-400 max-w-[155px] truncate" :title="pkt.target_host || pkt.url">
+                    {{ pkt.target_host || pkt.url }}
+                  </td>
+                  <td class="py-2 px-2 whitespace-nowrap w-36">
+                    <div class="flex items-center gap-2">
+                      <div class="w-16 bg-slate-200 dark:bg-slate-800 h-1.5 overflow-hidden">
+                        <div class="h-full"
+                          :class="pkt.latency_ms > 1500 ? 'bg-amber-500' : 'bg-emerald-500'"
+                          :style="{ width: Math.min(100, Math.max(8, (pkt.latency_ms / 2000) * 100)) + '%' }"></div>
+                      </div>
+                      <span :class="pkt.latency_ms > 1500 ? 'text-amber-600 dark:text-amber-400 font-bold' : 'text-slate-700 dark:text-slate-300'">
+                        {{ pkt.latency_ms }}ms
+                      </span>
+                    </div>
+                  </td>
+                  <td class="py-2 px-2 font-sans text-slate-600 dark:text-slate-400 max-w-[210px] truncate" :title="pkt.detail">
+                    {{ pkt.detail }}
+                  </td>
+                </tr>
+                <!-- 点击展开的 CDN 与报文完整详情抽屉 -->
+                <tr v-if="selectedPacketIdx === idx" class="bg-slate-100/90 dark:bg-slate-950">
+                  <td colspan="6" class="p-3 text-[11px] space-y-1 border-l-4 border-blue-600">
+                    <div><span class="text-slate-400">完整请求 URL：</span><span class="text-slate-800 dark:text-slate-200 break-all">{{ pkt.url }}</span></div>
+                    <div class="flex flex-wrap gap-4">
+                      <span><span class="text-slate-400">落地 IP：</span><strong class="text-emerald-600 dark:text-emerald-400">{{ pkt.extra?.ip || '直连' }}</strong></span>
+                      <span><span class="text-slate-400">DNS 耗时：</span><strong>{{ pkt.extra?.dns_ms || 0 }} ms</strong></span>
+                      <span><span class="text-slate-400">CDN 节点归属：</span><strong class="text-blue-600 dark:text-sky-400">{{ pkt.extra?.vendor || '官方源' }}</strong></span>
+                      <span><span class="text-slate-400">分片/报文体积：</span><strong>{{ formatBytes(pkt.size_bytes) }}</strong></span>
+                    </div>
+                    <div class="text-slate-500">{{ pkt.detail }}</div>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 第三行：IMAGE REPOSITORY & CLEANUP WORKBENCH // 镜像资产管理与清理 ==================== -->
+    <section class="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 p-4 space-y-3">
+      <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3 pb-3 border-b border-slate-200 dark:border-slate-800">
+        <div>
+          <h2 class="text-xs font-extrabold tracking-wider uppercase text-slate-900 dark:text-white">
+            IMAGE REPOSITORY & CLEANUP WORKBENCH // 镜像资产管理与清理
+          </h2>
+          <p class="text-[11px] font-mono text-slate-500 mt-0.5">
+            镜像占用: {{ hostInfo.df?.images_mb || 0 }} MB // 容器读写层: {{ hostInfo.df?.containers_mb || 0 }} MB // 数据卷: {{ hostInfo.df?.volumes_mb || 0 }} MB // 构建缓存: {{ hostInfo.df?.build_cache_mb || 0 }} MB (可回收 {{ hostInfo.df?.reclaimable_mb || 0 }} MB)
+          </p>
+        </div>
+
+        <div class="flex items-center gap-2 w-full md:w-auto">
+          <input v-model="imageFilter" placeholder="过滤镜像名称或 ID..."
+            class="border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-1.5 text-xs font-mono w-full md:w-64 focus:outline-none focus:border-blue-600" />
+          <button @click="pruneStorage"
+            class="border border-amber-500/80 bg-amber-50 dark:bg-amber-950/50 hover:bg-amber-100 text-amber-700 dark:text-amber-400 px-3 py-1.5 text-xs font-mono font-bold transition whitespace-nowrap">
+            清理悬空镜像 (PRUNE)
+          </button>
+          <button @click="loadAllData"
+            class="border border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-3 py-1.5 text-xs font-mono">
+            刷新
+          </button>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto max-h-60">
+        <table class="w-full text-left text-xs font-mono">
+          <thead class="bg-slate-50 dark:bg-slate-950 text-slate-400 border-b border-slate-200 dark:border-slate-800">
+            <tr>
+              <th class="p-2">REPOSITORY : TAG</th>
+              <th class="p-2">IMAGE ID</th>
+              <th class="p-2">SIZE</th>
+              <th class="p-2">CREATED</th>
+              <th class="p-2 text-right">ACTIONS</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-200/70 dark:divide-slate-800">
+            <tr v-for="img in filteredImages" :key="img.id" class="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+              <td class="p-2 font-bold text-blue-600 dark:text-sky-400">{{ img.tags[0] }}</td>
+              <td class="p-2 text-slate-500">sha256:{{ img.id }}</td>
+              <td class="p-2 text-slate-700 dark:text-slate-300">{{ img.size_mb }} MB</td>
+              <td class="p-2 text-slate-500">{{ img.created }}</td>
+              <td class="p-2 text-right space-x-2">
+                <button @click="pullInput = img.tags[0]; triggerPull()" :disabled="isPulling"
+                  class="px-2 py-0.5 border border-blue-300 dark:border-sky-800 text-blue-600 dark:text-sky-400 hover:bg-blue-50 text-[11px]">
+                  重拉测速
+                </button>
+                <button @click="deleteImage(img.tags[0] !== '<none>:<none>' ? img.tags[0] : img.id)"
+                  class="px-2 py-0.5 border border-rose-300 dark:border-rose-800 text-rose-600 dark:text-rose-400 hover:bg-rose-50 text-[11px]">
+                  移除 (RMI)
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ==================== 第四行：PORTAINER 堆栈联动工作台 & 堆栈部署甘特图 ==================== -->
+    <section class="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
+
+      <!-- 左侧 (6列)：PORTAINER STACKS WORKBENCH -->
+      <div class="lg:col-span-6 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 p-4 space-y-3">
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pb-3 border-b border-slate-200 dark:border-slate-800">
+          <h2 class="text-xs font-extrabold tracking-wider uppercase text-slate-900 dark:text-white">
+            PORTAINER STACKS WORKBENCH // 堆栈联动与一键重部署
+          </h2>
+          <span class="text-[11px] font-mono text-emerald-600 dark:text-emerald-400" v-if="portainerStacks.length > 0">
+            ● 已同步 {{ portainerStacks.length }} 个堆栈
+          </span>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <input v-model="ptUrl" placeholder="https://192.168.1.x:9443"
+            class="border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-xs font-mono flex-1 focus:outline-none" />
+          <input v-model="ptToken" type="password" placeholder="Access Token (ptr_xxx...)"
+            class="border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-2.5 py-1.5 text-xs font-mono flex-1 focus:outline-none" />
+          <button @click="savePortainerConfig"
+            class="bg-slate-800 dark:bg-sky-600 hover:bg-slate-700 text-white px-3.5 py-1.5 text-xs font-mono font-bold">
+            连接同步
+          </button>
+        </div>
+
+        <div v-if="ptError" class="p-2.5 border border-rose-400 bg-rose-50 dark:bg-rose-950/50 text-rose-600 dark:text-rose-300 text-xs font-mono">
+          {{ ptError }}
+        </div>
+
+        <div v-if="portainerStacks.length === 0 && !ptError" class="text-center py-8 text-xs text-slate-400 font-mono border border-dashed border-slate-200 dark:border-slate-800">
+          填入 Portainer URL 与 ptr_ 令牌，即可直接在此预览 Compose YAML 并触发带实时分片进度条的堆栈重部署。
+        </div>
+
+        <div v-else class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-64 overflow-y-auto pr-1">
+          <div v-for="st in portainerStacks" :key="st.id" class="border border-slate-200 dark:border-slate-800 p-3 bg-slate-50/50 dark:bg-slate-950 flex flex-col justify-between">
+            <div>
+              <div class="flex justify-between items-center font-mono">
+                <span class="font-bold text-xs text-slate-900 dark:text-white">{{ st.name }}</span>
+                <span class="text-[10px] px-1.5 py-0.5 font-bold" :class="st.status === 'ACTIVE' ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400' : 'bg-slate-200 text-slate-600'">
+                  {{ st.status }}
+                </span>
+              </div>
+              <div class="mt-2 flex flex-wrap gap-1">
+                <span v-for="img in st.images" :key="img" class="text-[10px] font-mono bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 px-1.5 py-0.5 text-blue-600 dark:text-sky-400 truncate max-w-full">
+                  {{ img }}
+                </span>
+              </div>
+            </div>
+            <div class="flex gap-2 mt-3 pt-2 border-t border-slate-200 dark:border-slate-800 font-mono text-[11px]">
+              <button @click="activeYamlStack = st" class="flex-1 border border-slate-300 dark:border-slate-700 py-1 hover:bg-slate-100 dark:hover:bg-slate-800">YAML 源码</button>
+              <button @click="redeployStack(st)" :disabled="isPulling" class="flex-1 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white py-1 font-bold">可视重部署</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右侧 (6列)：STACK & DAEMON EVENTS GANTT // 宿主机与堆栈部署甘特图 -->
+      <div class="lg:col-span-6 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-800 p-4 space-y-3">
+        <div class="flex justify-between items-center pb-3 border-b border-slate-200 dark:border-slate-800">
+          <div>
+            <h2 class="text-xs font-extrabold tracking-wider uppercase text-slate-900 dark:text-white">
+              STACK & DAEMON EVENTS GANTT // 堆栈部署与守护进程事件甘特图
+            </h2>
+          </div>
+          <button @click="clearGantt" class="text-[11px] font-mono border border-slate-300 dark:border-slate-700 px-2.5 py-1 hover:bg-slate-100 dark:hover:bg-slate-800">
+            清空时间轴
+          </button>
+        </div>
+
+        <div v-if="ganttItems.length === 0" class="text-center py-12 text-xs text-slate-400 font-mono border border-dashed border-slate-200 dark:border-slate-800">
+          监听就绪 (/events + /docker-api)。任何容器创建、网络变更或堆栈部署都会自动生成甘特图。
+        </div>
+
+        <div v-else class="space-y-1.5 max-h-72 overflow-y-auto pr-1 font-mono text-xs">
+          <div v-for="(item, idx) in ganttItems" :key="idx" class="grid grid-cols-12 items-center gap-2 p-2 border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950">
+            <div class="col-span-6 truncate flex items-center gap-1.5">
+              <span class="text-slate-400 text-[10px]">{{ item.created_at }}</span>
+              <span class="px-1 py-0.5 text-[10px] font-bold" :class="{
+                'bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300': item.stage_type === 'NETWORK',
+                'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300': item.stage_type === 'VOLUME',
+                'bg-blue-100 dark:bg-sky-950 text-blue-700 dark:text-sky-300': item.stage_type === 'PULL',
+                'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300': item.stage_type === 'CONTAINER'
+              }">{{ item.stage_type }}</span>
+              <span class="text-slate-700 dark:text-slate-200 truncate" :title="item.target">{{ item.action }}: {{ item.target }}</span>
+            </div>
+            <div class="col-span-4 bg-slate-200 dark:bg-slate-800 h-2.5 relative overflow-hidden">
+              <div class="h-full" :class="{
+                'bg-indigo-500': item.stage_type === 'NETWORK',
+                'bg-amber-500': item.stage_type === 'VOLUME',
+                'bg-blue-600': item.stage_type === 'PULL',
+                'bg-emerald-500': item.stage_type === 'CONTAINER'
+              }" :style="computeGanttBarStyle(item)"></div>
+            </div>
+            <div class="col-span-2 text-right text-[11px] text-slate-500">
+              +{{ item.start_sec }}s / <strong class="text-emerald-600 dark:text-emerald-400">{{ item.duration_sec }}s</strong>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- YAML 源码查看弹窗 -->
+    <div v-if="activeYamlStack" class="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div class="bg-white dark:bg-slate-900 border border-slate-400 dark:border-slate-700 max-w-2xl w-full p-4 space-y-3 shadow-xl">
+        <div class="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-2">
+          <h3 class="font-bold text-xs font-mono uppercase">STACK COMPOSE YAML // {{ activeYamlStack.name }}</h3>
+          <button @click="activeYamlStack = null" class="text-xs font-mono px-2 py-0.5 border border-slate-300">✕ CLOSE</button>
+        </div>
+        <pre class="bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 p-3 text-xs font-mono overflow-auto max-h-96">{{ activeYamlStack.yaml }}</pre>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const { createApp, ref, computed, onMounted } = Vue;
+
+    createApp({
+      setup() {
+        const isDark = ref(false);
+        const currentHost = ref(location.host);
+        const wsConnected = ref(false);
+        const pullInput = ref("jgraph/export-server:latest");
+        const isPulling = ref(false);
+        const activeImage = ref("");
+        const pullSource = ref("面板手动触发");
+        const pullStateTag = ref("IDLE");
+        const elapsedSec = ref(0);
+        const totalSpeedBps = ref(0);
+        const overallPercent = ref(0);
+        const downloadedBytes = ref(0);
+        const totalPullBytes = ref(0);
+        const etaSec = ref(0);
+        const completedLayers = ref(0);
+        const layers = ref([]);
+        const packets = ref([]);
+        const selectedPacketIdx = ref(null);
+        const ganttItems = ref([]);
+        const rateLimitRemaining = ref("-");
+        const imageFilter = ref("");
+        const hostInfo = ref({ host: {}, df: {}, containers: [], images: [] });
+        const stats = ref({ total_pulls: 0, total_mb: 0, total_packets: 0, avg_latency_ms: 0, history: [] });
+
+        // 5阶段流水线状态
+        const defaultStages = () => [
+          { idx: 1, title: "1. 协议握手", subtitle: "等待连接 Registry", status: "IDLE" },
+          { idx: 2, title: "2. Token 鉴权", subtitle: "等待申请 JWT", status: "IDLE" },
+          { idx: 3, title: "3. Manifest 清单", subtitle: "等待解析分片表", status: "IDLE" },
+          { idx: 4, title: "4. CDN 307 寻址", subtitle: "等待探测加速节点", status: "IDLE" },
+          { idx: 5, title: "5. 分片并发传输", subtitle: "等待数据流落盘", status: "IDLE" }
+        ];
+        const pipelineStages = ref(defaultStages());
+        const diagnosticText = ref("等待拉取任务触发，系统将自动对 OCI Registry 5 阶段通信链路进行实时毫秒级卡点诊断...");
+        const diagnosticError = ref(false);
+
+        // Portainer 状态
+        const ptUrl = ref("");
+        const ptToken = ref("");
+        const ptError = ref("");
+        const portainerStacks = ref([]);
+        const activeYamlStack = ref(null);
+
+        const toggleTheme = () => {
+          isDark.value = !isDark.value;
+          document.documentElement.classList.toggle("dark", isDark.value);
+        };
+
+        const formatBytes = (bytes) => {
+          if (!bytes || bytes <= 0) return "0 B";
+          const k = 1024, sizes = ["B", "KB", "MB", "GB"];
+          const i = Math.floor(Math.log(bytes) / Math.log(k));
+          return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+        };
+
+        const formatSpeed = (bps) => {
+          if (!bps || bps <= 0) return "0 B/s";
+          return formatBytes(bps) + "/s";
+        };
+
+        const layerSegmentWidths = (l) => {
+          const totalT = Math.max(0.2, (l.q_sec || 0) + (l.dl_sec || 0) + (l.ext_sec || 0));
+          const scale = (l.percent || 0) / 100;
+          const qW = ((l.q_sec || 0) / totalT) * 100 * scale;
+          const dlW = ((l.dl_sec || 0.1) / totalT) * 100 * scale;
+          const extW = ((l.ext_sec || 0) / totalT) * 100 * scale;
+          return { q: qW + "%", dl: dlW + "%", ext: extW + "%" };
+        };
+
+        const filteredImages = computed(() => {
+          const kw = imageFilter.value.trim().toLowerCase();
+          const list = hostInfo.value.images || [];
+          if (!kw) return list;
+          return list.filter(i => i.tags[0].toLowerCase().includes(kw) || i.id.toLowerCase().includes(kw));
+        });
+
+        const maxTimelineSec = computed(() => {
+          if (ganttItems.value.length === 0) return 10;
+          const maxEnd = Math.max(...ganttItems.value.map(i => (i.start_sec || 0) + (i.duration_sec || 0.1)));
+          return Math.max(maxEnd, 1.0);
+        });
+
+        const computeGanttBarStyle = (item) => {
+          const total = maxTimelineSec.value;
+          const leftPct = Math.min(94, ((item.start_sec || 0) / total) * 100);
+          const widthPct = Math.max(3, Math.min(100 - leftPct, ((item.duration_sec || 0.1) / total) * 100));
+          return { marginLeft: leftPct + "%", width: widthPct + "%" };
+        };
+
+        const loadAllData = async () => {
+          const [hRes, sRes] = await Promise.all([
+            fetch("/api/host-info").then(r => r.json()),
+            fetch("/api/stats").then(r => r.json())
+          ]);
+          hostInfo.value = hRes;
+          stats.value = sRes;
+          if (packets.value.length === 0 && sRes.packets) packets.value = sRes.packets;
+          if (ganttItems.value.length === 0 && sRes.gantt) ganttItems.value = sRes.gantt;
+        };
+
+        const loadPortainerStacks = async () => {
+          ptError.value = "";
+          const cfg = await fetch("/api/portainer/config").then(r => r.json());
+          if (cfg.url) ptUrl.value = cfg.url;
+          if (cfg.token_masked && !ptToken.value) ptToken.value = cfg.token_masked;
+          if (cfg.url && cfg.has_token) {
+            const res = await fetch("/api/portainer/stacks").then(r => r.json());
+            if (res.error) ptError.value = res.error;
+            else portainerStacks.value = res.stacks || [];
+          }
+        };
+
+        const savePortainerConfig = async () => {
+          await fetch("/api/portainer/config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: ptUrl.value, token: ptToken.value })
+          });
+          await loadPortainerStacks();
+        };
+
+        const redeployStack = async (st) => {
+          isPulling.value = true;
+          pipelineStages.value = defaultStages();
+          await fetch(`/api/portainer/stacks/${st.id}/redeploy`, { method: "POST" });
+        };
+
+        const triggerPull = async () => {
+          if (!pullInput.value.trim() || isPulling.value) return;
+          isPulling.value = true;
+          pullStateTag.value = "STARTING";
+          pipelineStages.value = defaultStages();
+          diagnosticError.value = false;
+          await fetch("/api/pull", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ image: pullInput.value, source: "面板手动触发" })
+          });
+        };
+
+        const abortPull = async () => {
+          await fetch("/api/pull/abort", { method: "POST" });
+          isPulling.value = false;
+          pullStateTag.value = "ABORTED";
+          totalSpeedBps.value = 0;
+        };
+
+        const deleteImage = async (imgRef) => {
+          await fetch(`/api/images/${encodeURIComponent(imgRef)}`, { method: "DELETE" });
+          await loadAllData();
+        };
+
+        const pruneStorage = async () => {
+          const res = await fetch("/api/host/prune", { method: "POST" }).then(r => r.json());
+          diagnosticText.value = `空间清理完成：已成功清理悬空镜像与构建缓存，释放 ${res.reclaimed_mb} MB。`;
+          await loadAllData();
+        };
+
+        const clearGantt = async () => {
+          await fetch("/api/gantt/clear", { method: "POST" });
+          ganttItems.value = [];
+        };
+
+        const connectWS = () => {
+          const proto = location.protocol === "https:" ? "wss:" : "ws:";
+          const ws = new WebSocket(`${proto}//${location.host}/ws`);
+          ws.onopen = () => { wsConnected.value = true; };
+          ws.onclose = () => { wsConnected.value = false; setTimeout(connectWS, 2000); };
+          ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "pull_start") {
+              isPulling.value = true;
+              activeImage.value = msg.image;
+              pullSource.value = msg.source || "面板手动触发";
+              pullStateTag.value = "STARTING";
+              layers.value = [];
+              overallPercent.value = 0;
+              elapsedSec.value = 0.1;
+              etaSec.value = 0;
+            } else if (msg.type === "pull_progress") {
+              pullStateTag.value = msg.state_tag || "DOWNLOADING";
+              pullSource.value = msg.source || pullSource.value;
+              elapsedSec.value = msg.elapsed_sec || elapsedSec.value;
+              totalSpeedBps.value = msg.total_speed_bps || 0;
+              overallPercent.value = msg.overall_percent || 0;
+              downloadedBytes.value = msg.downloaded_bytes || 0;
+              totalPullBytes.value = msg.total_bytes || 0;
+              etaSec.value = msg.eta_sec || 0;
+              completedLayers.value = msg.completed_layers || 0;
+              layers.value = msg.layers || [];
+            } else if (msg.type === "pull_done") {
+              isPulling.value = false;
+              pullStateTag.value = "COMPLETED";
+              totalSpeedBps.value = 0;
+              etaSec.value = 0;
+              overallPercent.value = 100;
+              loadAllData();
+            } else if (msg.type === "pull_aborted") {
+              isPulling.value = false;
+              pullStateTag.value = "ABORTED";
+              totalSpeedBps.value = 0;
+              diagnosticError.value = true;
+              diagnosticText.value = msg.message;
+            } else if (msg.type === "pipeline_update") {
+              const target = pipelineStages.value.find(s => s.idx === msg.stage_idx);
+              if (target) {
+                target.status = msg.status;
+                target.subtitle = msg.subtitle;
+              }
+              diagnosticText.value = msg.diagnostic;
+              diagnosticError.value = (msg.status === "ERROR");
+            } else if (msg.type === "net_packet") {
+              packets.value.unshift(msg.data);
+              if (msg.data.rate_limit) rateLimitRemaining.value = msg.data.rate_limit;
+              stats.value.total_packets += 1;
+            } else if (msg.type === "gantt_event") {
+              ganttItems.value.push(msg.data);
+            }
+          };
+        };
+
+        onMounted(() => {
+          loadAllData();
+          loadPortainerStacks();
+          connectWS();
+        });
+
+        return {
+          isDark, toggleTheme, currentHost, wsConnected, pullInput, isPulling,
+          activeImage, pullSource, pullStateTag, elapsedSec, totalSpeedBps,
+          overallPercent, downloadedBytes, totalPullBytes, etaSec, completedLayers,
+          layers, packets, selectedPacketIdx, ganttItems, rateLimitRemaining,
+          pipelineStages, diagnosticText, diagnosticError, imageFilter, filteredImages,
+          hostInfo, stats, ptUrl, ptToken, ptError, portainerStacks, activeYamlStack,
+          formatBytes, formatSpeed, layerSegmentWidths, computeGanttBarStyle,
+          triggerPull, abortPull, loadAllData, savePortainerConfig, redeployStack,
+          deleteImage, pruneStorage, clearGantt
+        };
+      }
+    }).mount("#app");
+  </script>
+</body>
+</html>
