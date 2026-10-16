@@ -49,6 +49,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - DB_FILE=/app/data/monitor.db
+```
 在该目录下执行后台启动命令：
 
 Bash
