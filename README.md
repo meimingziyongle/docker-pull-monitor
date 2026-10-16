@@ -2,6 +2,10 @@
 
 > 一个专为 Homelab 和开发者设计的轻量级、工业遥测风格的 **Docker 镜像实时拉取监控、OCI Registry 5阶段网络卡点诊断 & Portainer 堆栈部署甘特图** 运维面板。
 
+<div align="center">
+  <img src="./docker-pull-monitor.png" alt="Docker Pull Telemetry Dashboard" width="100%">
+</div>
+
 ---
 
 ## 🚀 核心特性 (Features)
@@ -45,3 +49,16 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - DB_FILE=/app/data/monitor.db
+在该目录下执行后台启动命令：
+
+Bash
+docker compose up -d
+打开浏览器访问：http://你的服务器IP:8001 即可体验。
+
+⚙️ 进阶：Portainer 联动配置
+如果你希望在 Portainer 原生页面点部署时同步记录甘特图：
+
+进入 Portainer -> Environments -> 修改你的环境 URL 为 http://宿主机局域网IP:8001/docker-api（或直接在面板绑定 Portainer Token 进行堆栈可视化管理）。
+
+📜 开源协议
+本项目采用 MIT License 开源协议。
